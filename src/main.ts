@@ -1,9 +1,18 @@
 import * as puppeteer from 'puppeteer';
+import * as uuid from 'uuid';
 import config from './config';
 import logger from './logger';
 
+async function screenshot(page: puppeteer.Page, sessionId: string, filename: string): Promise<Buffer | null> {
+  if (config.screenshot) {
+    return page.screenshot({ path: `${config.screenshotOutput}/${sessionId}-${filename}` });
+  }
+
+  return null;
+}
+
 async function main(): Promise<number> {
-  logger.info('Starting PPines utility bill pay process.');
+  logger.info('Starting PPines utility bill pay process session.');
 
   if (!config.accountNo) {
     logger.error('Account number not provided.');
@@ -15,31 +24,66 @@ async function main(): Promise<number> {
     return 1;
   }
 
+  const sessionId = uuid.v4();
+
   logger.info('Launching browser.');
-  const browser = await puppeteer.launch();
+
+  if (!config.headless) {
+    logger.warn('Disabling headless browser mode.');
+  }
+
+  if (config.slowmo > 0) {
+    logger.warn(`Slowing down browser operations by ${config.slowmo} ms.`);
+  }
+
+  const browser = await puppeteer.launch({ headless: config.headless, slowMo: config.slowmo });
   const page = await browser.newPage();
+
+  if (config.timeout !== 30000) {
+    logger.warn(`Setting page default timeout and default navigation timeout to ${config.timeout} ms.`);
+  }
+
+  await page.setDefaultNavigationTimeout(config.timeout);
+  await page.setDefaultTimeout(config.timeout);
+  await page.setViewport({ width: 1024, height: 768 });
 
   logger.info(`Navigating to PPines URL ${config.url}.`);
   await page.goto(config.url);
+  await screenshot(page, sessionId, 'item-search.png');
 
   logger.info('Entering account number and house number.');
-  await page.type('#ItemSearchQuestionUserInput_0__QuestionAnswer', config.accountNo);
-  await page.type('#ItemSearchQuestionUserInput_1__QuestionAnswer', config.houseNo);
-  await page.click('#SubmitButton');
-  await page.waitForNavigation();
 
-  logger.info('Extracting data.');
-  const data = await page.evaluate(() => {
-    const cells = Array.from(document.querySelectorAll('tr.lineItemRow > td.lineItemTextCell > div'));
-    return cells.map((cell) => cell.innerHTML.replace('\n', '').trimStart().trimEnd());
-  });
+  const accountNoSelector = 'input[name="ItemSearchQuestionUserInput[0].QuestionAnswer"]';
+  const houseNoSelector = 'input[name="ItemSearchQuestionUserInput[1].QuestionAnswer"]';
+  const submitSelector = 'input[type="submit"]';
+
+  await page.waitForSelector(submitSelector);
+  await page.type(accountNoSelector, config.accountNo);
+  await page.type(houseNoSelector, config.houseNo);
+  await screenshot(page, sessionId, 'item-search-submit.png');
+
+  logger.info('Submitting item search.');
+  await page.click(submitSelector);
+
+  const lineItemSelector = 'tr.lineItemRow > td.lineItemTextCell > div';
+  const paymentAmountSelector = 'input[name="CartUserInput.LineItems[0].SubFields[0].Value"]';
+
+  await page.waitForSelector(submitSelector);
+  await screenshot(page, sessionId, 'select-items.png');
+
+  logger.info('Extracting line items.');
+  const lineItem = await page.$$eval(lineItemSelector, (elements) =>
+    elements.map((element) => (element as HTMLElement).innerText),
+  );
+  const paymentAmount = await page.$eval(paymentAmountSelector, (element) => (element as HTMLInputElement).value);
 
   const utilityBill = {
-    accountNo: data[0],
-    serviceAddress: data[1],
-    name: data[2],
-    service: data[3],
-    amountOwed: data[4],
+    accountNo: lineItem[0],
+    serviceAddress: lineItem[1],
+    name: lineItem[2],
+    service: lineItem[3],
+    amountOwed: lineItem[4],
+    paymentAmount,
   };
 
   logger.info('Confirming account number.');
@@ -49,8 +93,13 @@ async function main(): Promise<number> {
   }
 
   logger.info(`Amount owed is $${utilityBill.amountOwed}.`);
-  logger.info(JSON.stringify(utilityBill));
-  await page.screenshot({ path: 'dist/payment-amount.png' });
+  logger.info(`Submitting payment amount of $${utilityBill.paymentAmount}.`);
+
+  await screenshot(page, sessionId, 'select-items-submit.png');
+  await page.click(submitSelector);
+
+  await page.waitForSelector(submitSelector);
+  await screenshot(page, sessionId, 'payment-entry.png');
 
   logger.info('Closing browser.');
   await browser.close();
@@ -59,7 +108,12 @@ async function main(): Promise<number> {
 
 main()
   .then((code: number) => {
-    logger.info('Process completed successfully.');
+    if (code === 0) {
+      logger.info('PPines utility bill pay process completed successfully.');
+    } else {
+      logger.warn('PPines utility bill pay process completed with errors.');
+    }
+
     process.exit(code);
   })
   .catch((err) => {
