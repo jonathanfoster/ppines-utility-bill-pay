@@ -10,7 +10,7 @@ export class SelectItemsPage extends BasePage {
   async parseLineItems(): Promise<void> {
     await this.page.waitForSelector(this.submitSelector);
     const lineItems = await this.page.$$eval(this.lineItemSelector, (elements) =>
-      elements.map((element) => (element as HTMLElement).innerText),
+      elements.map((element) => element.innerHTML.replace('\n', '').trimStart().trimEnd()),
     );
     const paymentAmount = await this.page.$eval(
       this.paymentAmountSelector,
