@@ -1,15 +1,8 @@
 import * as puppeteer from 'puppeteer';
-import * as uuid from 'uuid';
 import config from './config';
 import logger from './logger';
-
-async function screenshot(page: puppeteer.Page, sessionId: string, filename: string): Promise<Buffer | null> {
-  if (config.screenshot) {
-    return page.screenshot({ path: `${config.screenshotOutput}/${sessionId}-${filename}` });
-  }
-
-  return null;
-}
+import { ItemSearchPage } from './utility/item-search-page';
+import { SelectItemsPage } from './utility/select-items-page';
 
 async function main(): Promise<number> {
   logger.info('Starting PPines utility bill pay process session.');
@@ -23,8 +16,6 @@ async function main(): Promise<number> {
     logger.error('House number not provided.');
     return 1;
   }
-
-  const sessionId = uuid.v4();
 
   logger.info('Launching browser.');
 
@@ -48,58 +39,34 @@ async function main(): Promise<number> {
   await page.setViewport({ width: 1024, height: 768 });
 
   logger.info(`Navigating to PPines URL ${config.url}.`);
-  await page.goto(config.url);
-  await screenshot(page, sessionId, 'item-search.png');
+  const itemSearchPage = new ItemSearchPage(page, config.url);
+  await itemSearchPage.goto();
 
   logger.info('Entering account number and house number.');
+  itemSearchPage.accountNo = config.accountNo;
+  itemSearchPage.houseNo = config.houseNo;
+  await itemSearchPage.submit();
 
-  const accountNoSelector = 'input[name="ItemSearchQuestionUserInput[0].QuestionAnswer"]';
-  const houseNoSelector = 'input[name="ItemSearchQuestionUserInput[1].QuestionAnswer"]';
-  const submitSelector = 'input[type="submit"]';
+  logger.info('Parsing line items.');
+  const selectItemsPage = new SelectItemsPage(page);
+  await selectItemsPage.parseLineItems();
 
-  await page.waitForSelector(submitSelector);
-  await page.type(accountNoSelector, config.accountNo);
-  await page.type(houseNoSelector, config.houseNo);
-  await screenshot(page, sessionId, 'item-search-submit.png');
+  if (selectItemsPage.lineItems.length === 0) {
+    logger.warn('No line items found.');
+    return 0;
+  }
 
-  logger.info('Submitting item search.');
-  await page.click(submitSelector);
+  const lineItem = selectItemsPage.lineItems[0];
 
-  const lineItemSelector = 'tr.lineItemRow > td.lineItemTextCell > div';
-  const paymentAmountSelector = 'input[name="CartUserInput.LineItems[0].SubFields[0].Value"]';
-
-  await page.waitForSelector(submitSelector);
-  await screenshot(page, sessionId, 'select-items.png');
-
-  logger.info('Extracting line items.');
-  const lineItem = await page.$$eval(lineItemSelector, (elements) =>
-    elements.map((element) => (element as HTMLElement).innerText),
-  );
-  const paymentAmount = await page.$eval(paymentAmountSelector, (element) => (element as HTMLInputElement).value);
-
-  const utilityBill = {
-    accountNo: lineItem[0],
-    serviceAddress: lineItem[1],
-    name: lineItem[2],
-    service: lineItem[3],
-    amountOwed: lineItem[4],
-    paymentAmount,
-  };
-
-  logger.info('Confirming account number.');
-  if (utilityBill.accountNo !== config.accountNo) {
-    logger.error('Unable to confirm account number on select items page.');
+  logger.info('Verifying account number.');
+  if (lineItem.accountNo !== config.accountNo) {
+    logger.error('Unable to verify account number on select items page.');
     return 1;
   }
 
-  logger.info(`Amount owed is $${utilityBill.amountOwed}.`);
-  logger.info(`Submitting payment amount of $${utilityBill.paymentAmount}.`);
-
-  await screenshot(page, sessionId, 'select-items-submit.png');
-  await page.click(submitSelector);
-
-  await page.waitForSelector(submitSelector);
-  await screenshot(page, sessionId, 'payment-entry.png');
+  logger.info(`Amount owed is $${lineItem.amountOwed}.`);
+  logger.info(`Submitting payment amount of $${lineItem.paymentAmount}.`);
+  await selectItemsPage.submit();
 
   logger.info('Closing browser.');
   await browser.close();
